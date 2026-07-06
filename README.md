@@ -51,7 +51,14 @@ Each run creates a fresh folder: `D435I/<date>/<time>/`.
 | `--ir {both,left,right,none}` | `none` | Record infrared imager(s). See [Infrared](#infrared-streams) |
 | `--max-minutes N` | `0` | Safety cap (`0` = no limit) |
 | `--camera-name NAME` | `D435I` | Top-level output folder name |
-| `--base-dir PATH` | `.` | Where the folder tree is created |
+| `--base-dir PATH` | `.` | Parent dir; output goes to `<base-dir>/<camera-name>/<date>/<time>/` |
+| `--out DIR` | — | Write **directly** into this exact folder (skips the date/time nesting) |
+
+Examples:
+```bash
+python rs_capture_fast.py --base-dir /data/recordings        # /data/recordings/D435I/<date>/<time>/
+python rs_capture_fast.py --out /data/run_042                # writes straight into /data/run_042/
+```
 
 ## Output
 
@@ -108,6 +115,42 @@ bandwidth:
 To keep a solid 30 fps *with* IR, drop color to 720p: `--ir both --cw 1280 --ch 720`.
 (Frame-rate impact is USB-bandwidth-bound, not a pipeline limitation — the pipeline never
 drops frames.)
+
+## Platforms
+
+Pure `pyrealsense2` + OpenCV + NumPy — no OS-specific code — so it runs on **Linux and
+Windows**.
+
+### Ubuntu 22.04 (e.g. Intel NUC)
+
+Works well — RealSense is first-class on Linux, and a NUC's Intel USB controller is a great
+host for the D435i. Setup:
+
+```bash
+# Option A: Intel apt repo (recommended - includes udev rules)
+sudo mkdir -p /etc/apt/keyrings
+curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | sudo tee /etc/apt/sources.list.d/librealsense.list
+sudo apt update
+sudo apt install librealsense2-utils librealsense2-dev python3-pyrealsense2
+
+# Option B: pip (Python 3.10 on 22.04)
+pip install pyrealsense2
+
+pip install opencv-python numpy      # (or python3-opencv via apt)
+```
+
+Linux notes:
+- **udev rules**: installed by `librealsense2-utils` (or from the librealsense repo). They let
+  you access the camera without `sudo`. Replug the camera after installing. If you used pip
+  only, grab `99-realsense-libusb.rules` from the librealsense repo and install it.
+- **Headless NUC** (no desktop): run with `--no-preview`. The script also auto-falls back to
+  headless if OpenCV has no GUI backend.
+- **CPU**: lossless-PNG color encoding at 1080p30 is multi-threaded. On an i5/i7 NUC it keeps
+  up easily; on a low-power NUC (Celeron/N-series) watch `capture_report.json` — if
+  `color queue_drops > 0`, lower resolution/fps or reduce the color worker count.
+- The USB-power-management tip below is Windows-specific; on Linux the default USB autosuspend
+  is generally fine for the D435i.
 
 ## Notes / gotchas
 

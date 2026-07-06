@@ -409,6 +409,9 @@ def main():
     p = argparse.ArgumentParser(description="D435i capture at correct FPS (no dropped frames)")
     p.add_argument("--camera-name", default="D435I")
     p.add_argument("--base-dir", default=".")
+    p.add_argument("--out", default=None,
+                   help="write directly into this exact folder (skips the "
+                        "<base-dir>/<camera-name>/<date>/<time> nesting)")
     p.add_argument("--max-minutes", type=float, default=0)
     p.add_argument("--secs", type=float, default=0, help="auto-stop after N seconds (0 = until ESC)")
     p.add_argument("--no-preview", action="store_true", help="run headless (no preview window)")
@@ -417,7 +420,10 @@ def main():
                         "'both'+1080p exceeds USB3 -> ~21fps; 'left' -> ~27fps; use 720p color for solid 30fps")
     args = p.parse_args()
     ir_map = {"both": (1, 2), "left": (1,), "right": (2,), "none": ()}
-    run_dir = make_run_dir(args.camera_name, args.base_dir)
+    if args.out:
+        run_dir = Path(args.out); run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = make_run_dir(args.camera_name, args.base_dir)
     capture(run_dir, max_minutes=args.max_minutes, secs=args.secs,
             preview=not args.no_preview, ir_streams=ir_map[args.ir])
     print(f"\nAll done. Everything under: {run_dir}")
