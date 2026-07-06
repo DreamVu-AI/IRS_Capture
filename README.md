@@ -49,6 +49,9 @@ Each run creates a fresh folder: `D435I/<date>/<time>/`.
 | `--secs N` | `0` | Auto-stop after N seconds (`0` = until ESC / window close) |
 | `--no-preview` | off | Headless — no preview window (auto-falls back if OpenCV has no GUI) |
 | `--ir {both,left,right,none}` | `none` | Record infrared imager(s). See [Infrared](#infrared-streams) |
+| `--powerline {50,60,auto,off}` | `50` | RGB anti-flicker for mains lighting (50 = India/EU, 60 = US/Japan) |
+| `--color-exposure N` | auto | Fix RGB exposure (µs); disables color auto-exposure (stops brightness pulsing) |
+| `--color-gain N` | auto | Fix RGB gain (use with `--color-exposure`) |
 | `--max-minutes N` | `0` | Safety cap (`0` = no limit) |
 | `--camera-name NAME` | `D435I` | Top-level output folder name |
 | `--base-dir PATH` | `.` | Parent dir; output goes to `<base-dir>/<camera-name>/<date>/<time>/` |
@@ -151,6 +154,23 @@ Linux notes:
   `color queue_drops > 0`, lower resolution/fps or reduce the color worker count.
 - The USB-power-management tip below is Windows-specific; on Linux the default USB autosuspend
   is generally fine for the D435i.
+
+## Flicker / banding under artificial light
+
+If the color video shows rolling brightness **flicker/banding**, it's a mismatch between the
+camera exposure and the mains frequency of the lights (lights pulse at 50 Hz or 60 Hz). The
+RGB camera's default `Power Line Frequency = Auto` often mis-detects. Force it:
+
+```bash
+python rs_capture_fast.py --powerline 50     # 50 Hz mains (India, EU) - DEFAULT
+python rs_capture_fast.py --powerline 60     # 60 Hz mains (US, Japan)
+```
+
+If brightness still *pulses* frame-to-frame (auto-exposure "hunting"), lock the exposure:
+```bash
+python rs_capture_fast.py --powerline 50 --color-exposure 156 --color-gain 64
+```
+The chosen values are recorded in `camera_settings.json` for each run.
 
 ## Notes / gotchas
 

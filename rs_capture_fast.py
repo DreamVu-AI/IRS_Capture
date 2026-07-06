@@ -63,7 +63,8 @@ def make_run_dir(camera_name, base_dir):
 
 def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
             max_minutes=0, secs=0, preview=True, qcap=256,
-            color_workers=6, depth_workers=4, ir_workers=3, jpeg=95, ir_streams=(1, 2)):
+            color_workers=6, depth_workers=4, ir_workers=3, jpeg=95, ir_streams=(1, 2),
+            powerline="50", color_exposure=None, color_gain=None):
     dw, dh = depth_wh
     cw, ch = color_wh
     depth_dir = run_dir / "depth_npy"
@@ -170,6 +171,29 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
             rng = s.get_option_range(rs.option.frames_queue_size)
             s.set_option(rs.option.frames_queue_size, int(rng.max))
     depth_scale[0] = dev.first_depth_sensor().get_depth_scale()
+
+    # ---- anti-flicker + optional manual exposure on the RGB sensor ----
+    # Flicker/banding under artificial light comes from a mismatch between exposure and the
+    # mains frequency. Force Power Line Frequency (0=off,1=50Hz,2=60Hz,3=auto) to your mains.
+    color_sensor = next((s for s in dev.query_sensors()
+                         if s.get_info(rs.camera_info.name) == "RGB Camera"), None)
+    if color_sensor:
+        plf = {"off": 0, "50": 1, "60": 2, "auto": 3}[str(powerline)]
+        try:
+            if color_sensor.supports(rs.option.power_line_frequency):
+                color_sensor.set_option(rs.option.power_line_frequency, plf)
+                print(f"RGB power_line_frequency -> {powerline}Hz (anti-flicker)")
+        except Exception as e:
+            print("power_line_frequency set failed:", e)
+        if color_exposure is not None:  # fixed exposure removes auto-exposure brightness pulsing
+            try:
+                color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                color_sensor.set_option(rs.option.exposure, color_exposure)
+                if color_gain is not None:
+                    color_sensor.set_option(rs.option.gain, color_gain)
+                print(f"RGB manual exposure={color_exposure} gain={color_gain} (auto-exposure OFF)")
+            except Exception as e:
+                print("manual exposure set failed:", e)
 
     # metadata: color intrinsics at TOP LEVEL (unchanged schema, keeps rs_slam.py working)
     #           + depth intrinsics + depth->color extrinsics + depth scale (for point clouds)
@@ -418,6 +442,13 @@ def main():
     p.add_argument("--ir", default="none", choices=["both", "left", "right", "none"],
                    help="which infrared imagers to record (default none, to keep 1080p30). "
                         "'both'+1080p exceeds USB3 -> ~21fps; 'left' -> ~27fps; use 720p color for solid 30fps")
+    p.add_argument("--powerline", default="50", choices=["50", "60", "auto", "off"],
+                   help="RGB anti-flicker for mains lighting (default 50 for 50Hz regions like "
+                        "India/EU; use 60 for US/Japan). Fixes flicker/banding under lights")
+    p.add_argument("--color-exposure", type=int, default=None,
+                   help="fix RGB exposure in microseconds (disables color auto-exposure -> "
+                        "stops brightness pulsing). Try ~156 indoors")
+    p.add_argument("--color-gain", type=int, default=None, help="fix RGB gain (use with --color-exposure)")
     args = p.parse_args()
     ir_map = {"both": (1, 2), "left": (1,), "right": (2,), "none": ()}
     if args.out:
@@ -425,7 +456,8 @@ def main():
     else:
         run_dir = make_run_dir(args.camera_name, args.base_dir)
     capture(run_dir, max_minutes=args.max_minutes, secs=args.secs,
-            preview=not args.no_preview, ir_streams=ir_map[args.ir])
+            preview=not args.no_preview, ir_streams=ir_map[args.ir],
+            powerline=args.powerline, color_exposure=args.color_exposure, color_gain=args.color_gain)
     print(f"\nAll done. Everything under: {run_dir}")
 
 
