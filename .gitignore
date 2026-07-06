@@ -1,0 +1,27 @@
+# Recordings / capture output (never commit data)
+D435I/
+*.db3
+*.bag
+*.npy
+*.mp4
+*.png
+*.jpg
+*.jpeg
+captures/
+recordings/
+*_output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
