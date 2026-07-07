@@ -52,6 +52,8 @@ Each run creates a fresh folder: `D435I/<date>/<time>/`.
 | `--powerline {50,60,auto,off}` | `50` | RGB anti-flicker for mains lighting (50 = India/EU, 60 = US/Japan) |
 | `--color-exposure N` | auto | Fix RGB exposure (µs); disables color auto-exposure (stops brightness pulsing) |
 | `--color-gain N` | auto | Fix RGB gain (use with `--color-exposure`) |
+| `--color-format {jpeg,png,png0,raw}` | `jpeg` | Color encoding. `jpeg` q100 = fast + visually lossless (no drops); `png`/`png0` = lossless but slow; `raw` = `.npy` lossless huge |
+| `--color-quality N` | `100` | JPEG quality when `--color-format jpeg` |
 | `--max-minutes N` | `0` | Safety cap (`0` = no limit) |
 | `--camera-name NAME` | `D435I` | Top-level output folder name |
 | `--base-dir PATH` | `.` | Parent dir; output goes to `<base-dir>/<camera-name>/<date>/<time>/` |
@@ -69,7 +71,7 @@ Per run, into `D435I/<date>/<time>/`:
 
 | File | Contents |
 |---|---|
-| `color_frames/000123.png` | Color, **lossless PNG** 1920×1080 — the color data |
+| `color_frames/000123.jpg` | Color 1920×1080 — the color data (`.jpg` default; `.png`/`.npy` with `--color-format`) |
 | `depth_npy/depth_00123.npy` | Raw `uint16` depth, 1280×720 (millimetres = value × `depth_scale_m`) |
 | `color.mp4` / `depth_video.mp4` | Lossy previews only (not the data) |
 | `imu_accel.csv` | `timestamp_ms, ax_m_s2, ay_m_s2, az_m_s2` |
@@ -171,6 +173,23 @@ If brightness still *pulses* frame-to-frame (auto-exposure "hunting"), lock the 
 python rs_capture_fast.py --powerline 50 --color-exposure 156 --color-gain 64
 ```
 The chosen values are recorded in `camera_settings.json` for each run.
+
+## Video timing & the `make_video.py` tool
+
+`color.mp4` / `depth_video.mp4` are built on the **real timeline from frame timestamps**, not
+at a naive fixed fps — so even if frames arrive irregularly (or a few drop), the video plays at
+correct real-time speed with gaps shown as a brief hold rather than a jerky jump.
+
+To rebuild a real-time video from an already-recorded run's frames:
+```bash
+python make_video.py <run_dir>            # rebuilds color_realtime.mp4 from color_frames + timestamps
+python make_video.py <run_dir> --depth    # depth_realtime.mp4
+```
+
+> Frame drops: color encoding must keep up with 30 fps. **PNG at 1080p is ~239 ms/frame**, which
+> 6 workers can't sustain (drops frames); **JPEG q100 is ~17 ms** with huge margin. That's why
+> `jpeg` is the default. If `capture_report.json` shows `color queue_drops > 0`, your encoder is
+> too slow — use `--color-format jpeg` or lower the resolution/fps.
 
 ## Notes / gotchas
 

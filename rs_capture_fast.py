@@ -63,8 +63,9 @@ def make_run_dir(camera_name, base_dir):
 
 def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
             max_minutes=0, secs=0, preview=True, qcap=256,
-            color_workers=6, depth_workers=4, ir_workers=3, jpeg=95, ir_streams=(1, 2),
-            powerline="50", color_exposure=None, color_gain=None):
+            color_workers=6, depth_workers=4, ir_workers=3, ir_streams=(1, 2),
+            powerline="50", color_exposure=None, color_gain=None,
+            color_format="jpeg", color_quality=100):
     dw, dh = depth_wh
     cw, ch = color_wh
     depth_dir = run_dir / "depth_npy"
@@ -256,16 +257,28 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
     #  bottlenecks on a single video encoder - that was the 25-drop problem.)
     written = {"color": 0, "depth": 0, "ir": 0}
 
+    # color encoder: jpeg (fast, ~visually lossless) | png (l1) | png0 (lossless) | raw (.npy).
+    # PNG at 1080p is ~239ms/frame -> 6 workers can't hold 30fps; jpeg is ~17ms -> huge margin.
+    color_ext = {"jpeg": "jpg", "png": "png", "png0": "png", "raw": "npy"}[color_format]
+    def encode_color(img):
+        if color_format == "jpeg": return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, color_quality])
+        if color_format == "png":  return cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        if color_format == "png0": return cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+        return True, None  # raw handled directly
+
     def color_worker():
         while True:
             item = color_q.get()
             if item is None: color_q.task_done(); break
             idx, img = item
-            # lossless PNG (level 1 = fast, smaller than level 0; bit-exact either way)
-            ok, enc = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-            if ok:
-                with open(color_dir / f"{idx:06d}.png", "wb") as f: f.write(enc)
-                written["color"] += 1
+            path = color_dir / f"{idx:06d}.{color_ext}"
+            if color_format == "raw":
+                np.save(str(path), img); written["color"] += 1
+            else:
+                ok, enc = encode_color(img)
+                if ok:
+                    with open(path, "wb") as f: f.write(enc)
+                    written["color"] += 1
             color_q.task_done()
 
     def depth_worker():
@@ -345,26 +358,43 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
         for _ in range(ir_workers): ir_q.put(None)
     for t in threads: t.join(timeout=5)
 
-    # ---- OFFLINE finalize: build color.mp4 + colorized depth_video.mp4 in order ----
-    print("Finalizing videos (offline, no frames at risk) ...")
-    # color.mp4 is only a lossy PREVIEW - the lossless data lives in color_frames/*.png
-    pngs = sorted(color_dir.glob("*.png"), key=lambda p: int(p.stem))
-    if pngs:
-        vw = cv2.VideoWriter(str(run_dir / "color.mp4"),
-                             cv2.VideoWriter_fourcc(*"mp4v"), fps, (cw, ch))
-        for p in pngs: vw.write(cv2.imread(str(p)))
+    # ---- OFFLINE finalize: REAL-TIME color.mp4 + depth_video.mp4 from timestamps ----
+    # Frames arrive at slightly irregular times and any drop leaves a gap. Writing them
+    # back-to-back at fixed fps runs fast/jittery -> instead resample onto the true timeline,
+    # holding the most-recent frame through gaps so motion stays continuous and correct-speed.
+    print("Finalizing real-time videos (offline) ...")
+    color_ts_map = {r[0]: r[1] for r in frame_ts}   # idx -> color timestamp_ms
+    depth_ts_map = {r[0]: r[2] for r in frame_ts}    # idx -> depth timestamp_ms
+
+    def realtime_video(out_path, files_ts, w, h, render):
+        if len(files_ts) < 2: return
+        files_ts.sort()
+        tsarr = np.array([t for t, _ in files_ts])
+        t0, tN = tsarr[0], tsarr[-1]
+        n_out = int(round((tN - t0) / 1000.0 * fps))
+        vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        ci, cache = -1, None
+        for k in range(n_out):
+            t = t0 + (k / fps) * 1000.0
+            i = max(0, int(np.searchsorted(tsarr, t, side="right") - 1))
+            if i != ci: cache = render(files_ts[i][1]); ci = i
+            vw.write(cache)
         vw.release()
-    npys = sorted(depth_dir.glob("depth_*.npy"), key=lambda p: int(p.stem.split("_")[1]))
-    if npys:
-        vw = cv2.VideoWriter(str(run_dir / "depth_video.mp4"),
-                             cv2.VideoWriter_fourcc(*"mp4v"), fps, (dw, dh))
-        for p in npys:
-            d16 = np.load(str(p))
-            dm = np.clip(d16.astype(np.float32) * depth_scale[0], 0.3, 6.0)
-            norm = ((dm - 0.3) / (6.0 - 0.3) * 255).astype(np.uint8)
-            vis = cv2.applyColorMap(norm, cv2.COLORMAP_JET); vis[d16 == 0] = 0
-            vw.write(vis)
-        vw.release()
+
+    read_color = (lambda p: np.load(str(p))) if color_format == "raw" else (lambda p: cv2.imread(str(p)))
+    cfiles = [(color_ts_map[int(p.stem)], p) for p in color_dir.glob(f"*.{color_ext}")
+              if int(p.stem) in color_ts_map]
+    realtime_video(run_dir / "color.mp4", cfiles, cw, ch, read_color)
+
+    def render_depth(p):
+        d16 = np.load(str(p))
+        dm = np.clip(d16.astype(np.float32) * depth_scale[0], 0.3, 6.0)
+        norm = ((dm - 0.3) / (6.0 - 0.3) * 255).astype(np.uint8)
+        vis = cv2.applyColorMap(norm, cv2.COLORMAP_JET); vis[d16 == 0] = 0
+        return vis
+    dfiles = [(depth_ts_map[int(p.stem.split("_")[1])], p) for p in depth_dir.glob("depth_*.npy")
+              if int(p.stem.split("_")[1]) in depth_ts_map]
+    realtime_video(run_dir / "depth_video.mp4", dfiles, dw, dh, render_depth)
 
     # IMU: accel + gyro as separate CSV streams (mirrors the two db3 topics).
     #   imu_accel.csv: timestamp_ms, ax_m_s2, ay_m_s2, az_m_s2   (linear acceleration)
@@ -378,7 +408,7 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
         w = csv.writer(f); w.writerow(["timestamp_ms", "gx_rad_s", "gy_rad_s", "gz_rad_s"]); w.writerows(gyr)
 
     # per-frame hardware timestamps -> lets you sync color/depth to IMU by TIME (not frame index).
-    #   frame_index N  <->  color_frames/{N:06d}.png  and  depth_npy/depth_{N:05d}.npy
+    #   frame_index N  <->  color_frames/{N:06d}.<ext>  and  depth_npy/depth_{N:05d}.npy
     with open(run_dir / "frames_index.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["frame_index", "color_timestamp_ms", "depth_timestamp_ms",
@@ -399,7 +429,8 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
               "startup_latency_s": round(rec_dur - stream_span, 2),
               "total_incl_finalize_s": round(total_dur, 2), "fps_target": fps,
               "color": {"recv": recv["color"], "written": written["color"], "queue_drops": qdrop["color"],
-                        "capture_hz": hz(color_ts), "format": "png_lossless"},
+                        "capture_hz": hz(color_ts), "format": color_format,
+                        "quality": color_quality if color_format == "jpeg" else None},
               "depth": {"recv": recv["depth"], "written": written["depth"], "queue_drops": qdrop["depth"],
                         "capture_hz": hz(depth_ts)},
               "ir": {"imagers": list(ir_streams), "recv": recv["ir"], "written": written["ir"],
@@ -417,13 +448,16 @@ def capture(run_dir, depth_wh=(1280, 720), color_wh=(1920, 1080), fps=30,
 
     print("\n===== DONE  (stream %.1fs + %.1fs startup, finalize %.1fs) =====" %
           (stream_span, rec_dur - stream_span, total_dur - rec_dur))
-    print(f"Color: {written['color']} PNG frames @ {report['color']['capture_hz']} Hz, drops {qdrop['color']}")
+    print(f"Color: {written['color']} {color_format} frames @ {report['color']['capture_hz']} Hz, drops {qdrop['color']}")
     print(f"Depth: {written['depth']} npy frames @ {report['depth']['capture_hz']} Hz, drops {qdrop['depth']}")
     if ir_streams:
         print(f"IR   : {written['ir']} PNG frames ({len(ir_streams)} imager(s)) @ "
               f"{report['ir']['capture_hz']} Hz/imager, drops {qdrop['ir']}")
     print(f"Accel: {len(acc)} @ {report['imu']['accel_hz']} Hz -> imu_accel.csv")
     print(f"Gyro : {len(gyr)} @ {report['imu']['gyro_hz']} Hz -> imu_gyro.csv")
+    if qdrop["color"] or qdrop["depth"]:
+        print(f"WARNING: {qdrop['color']} color / {qdrop['depth']} depth frames DROPPED (encoder too slow). "
+              f"Use --color-format jpeg, or lower resolution/fps.")
     print(f"Files under: {run_dir}")
     print(f"To meters : depth_m = depth_array.astype(float) * {depth_scale[0]}")
     return run_dir
@@ -449,6 +483,10 @@ def main():
                    help="fix RGB exposure in microseconds (disables color auto-exposure -> "
                         "stops brightness pulsing). Try ~156 indoors")
     p.add_argument("--color-gain", type=int, default=None, help="fix RGB gain (use with --color-exposure)")
+    p.add_argument("--color-format", default="jpeg", choices=["jpeg", "png", "png0", "raw"],
+                   help="color frame encoding. jpeg=fast+visually-lossless (default, no drops); "
+                        "png=lossless but ~239ms/frame (DROPS frames at 1080p30); png0=lossless big; raw=.npy lossless huge")
+    p.add_argument("--color-quality", type=int, default=100, help="JPEG quality when --color-format jpeg (default 100)")
     args = p.parse_args()
     ir_map = {"both": (1, 2), "left": (1,), "right": (2,), "none": ()}
     if args.out:
@@ -457,7 +495,8 @@ def main():
         run_dir = make_run_dir(args.camera_name, args.base_dir)
     capture(run_dir, max_minutes=args.max_minutes, secs=args.secs,
             preview=not args.no_preview, ir_streams=ir_map[args.ir],
-            powerline=args.powerline, color_exposure=args.color_exposure, color_gain=args.color_gain)
+            powerline=args.powerline, color_exposure=args.color_exposure, color_gain=args.color_gain,
+            color_format=args.color_format, color_quality=args.color_quality)
     print(f"\nAll done. Everything under: {run_dir}")
 
 
